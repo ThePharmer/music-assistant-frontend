@@ -3,6 +3,15 @@
     <!-- Logo -->
     <div class="guest-logo">
       <img :src="logoSrc" alt="Music Assistant" class="logo-img" />
+      <button
+        v-if="guestIdentity"
+        class="guest-name-chip"
+        :title="$t('providers.party.guest_page.your_name')"
+        @click="changeGuestName"
+      >
+        <UserRound :size="12" />
+        <span>{{ guestIdentity.display_name }}</span>
+      </button>
     </div>
 
     <!-- Search Section -->
@@ -209,6 +218,7 @@ import PartySearchBar from "@/components/party/PartySearchBar.vue";
 import PartyTokensBadge from "@/components/party/PartyTokensBadge.vue";
 import { Button } from "@/components/ui/button";
 import Spinner from "@/components/ui/spinner/Spinner.vue";
+import { useGuestIdentity } from "@/composables/useGuestIdentity";
 import { useGuestQueue } from "@/composables/useGuestQueue";
 import { useGuestSearch } from "@/composables/useGuestSearch";
 import { usePartyConfig } from "@/composables/usePartyConfig";
@@ -224,7 +234,7 @@ import {
 } from "@/plugins/api/interfaces";
 import { $t } from "@/plugins/i18n";
 import { store } from "@/plugins/store";
-import { ArrowLeft, Music, Search } from "@lucide/vue";
+import { ArrowLeft, Music, Search, UserRound } from "@lucide/vue";
 import {
   computed,
   nextTick,
@@ -244,6 +254,12 @@ const logoSrc = computed(() =>
 );
 
 // --- Composables ---
+const {
+  identity: guestIdentity,
+  register: registerGuest,
+  ensureIdentity,
+  identityParams,
+} = useGuestIdentity();
 const { config: partyConfig, fetchConfig } = usePartyConfig();
 const rateLimit = useRateLimiting();
 const {
@@ -354,6 +370,22 @@ const handleClear = () => {
   // Scroll is triggered by the watcher above when PartyQueueSection remounts
 };
 
+// --- Guest identity ---
+const changeGuestName = async () => {
+  const current = guestIdentity.value?.display_name || "";
+  const name = window.prompt(
+    $t("providers.party.guest_page.your_name"),
+    current,
+  );
+  if (!name || !name.trim() || name.trim() === current) return;
+  const result = await registerGuest(name.trim());
+  if (result) {
+    toast.success(
+      $t("providers.party.guest_page.name_updated", [result.display_name]),
+    );
+  }
+};
+
 const handleBack = (event: PopStateEvent) => {
   if (
     selectedArtist.value ||
@@ -406,6 +438,7 @@ const addToQueue = async (item: Track | Artist, position: "next" | "end") => {
     const result = (await api.sendCommand("party/add_to_queue", {
       uri: item.uri,
       boost: position === "next",
+      ...identityParams(),
     })) as { success: boolean; boosted: boolean; started_playback: boolean };
 
     if (!result.success) {
@@ -454,6 +487,7 @@ const boostQueueItem = async (item: QueueItem) => {
   try {
     const result = (await api.sendCommand("party/boost_queue_item", {
       queue_item_id: item.queue_item_id,
+      ...identityParams(),
     })) as { success: boolean };
 
     if (!result.success) {
@@ -490,7 +524,9 @@ const skipCurrentSong = async () => {
 
   skippingSong.value = true;
   try {
-    const result = (await api.sendCommand("party/skip")) as {
+    const result = (await api.sendCommand("party/skip", {
+      ...identityParams(),
+    })) as {
       success: boolean;
     };
 
@@ -553,6 +589,9 @@ const fetchAndApplyConfig = async () => {
 onMounted(async () => {
   await fetchAndApplyConfig();
 
+  // Register the guest identity (non-blocking: failures leave actions unattributed)
+  ensureIdentity();
+
   history.pushState(null, "", location.href);
   window.addEventListener("popstate", handleBack);
 
@@ -605,6 +644,31 @@ onBeforeUnmount(() => {
   justify-content: center;
   padding-bottom: 0.75rem;
   flex-shrink: 0;
+  position: relative;
+}
+
+.guest-name-chip {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  background: rgba(var(--v-theme-surface-variant), 0.1);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.15);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  cursor: pointer;
+  max-width: 8rem;
+}
+
+.guest-name-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logo-img {

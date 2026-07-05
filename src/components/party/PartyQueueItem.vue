@@ -148,9 +148,14 @@ const badgeIconComponent = computed(() =>
   isBoosted.value ? Rocket : UserRound,
 );
 
-const badgeLabel = computed(() =>
-  isBoosted.value ? $t("providers.party.boost") : $t("providers.party.request"),
-);
+// Prefer the guest's display name ("added by") over the generic label
+const badgeLabel = computed(() => {
+  const guestName = props.item.extra_attributes?.party_guest_name;
+  if (typeof guestName === "string" && guestName) return guestName;
+  return isBoosted.value
+    ? $t("providers.party.boost")
+    : $t("providers.party.request");
+});
 </script>
 
 <style scoped>

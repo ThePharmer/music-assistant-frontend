@@ -872,6 +872,8 @@ export interface QueueItem {
   extra_attributes?: {
     party_guest?: boolean; // true if added by party guest
     party_boosted?: boolean; // true if added as "boost" (play next)
+    party_guest_id?: string; // server-signed identity of the adding guest
+    party_guest_name?: string; // display name of the adding guest ("added by")
     playback_speed?: number; // current playback speed multiplier (audiobook/podcast)
   };
 }

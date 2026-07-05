@@ -1102,7 +1102,9 @@
                 "unknown_artist": "Unknown Artist",
                 "view_songs": "View Songs",
                 "added": "Added",
-                "already_in_queue": "Already in queue"
+                "already_in_queue": "Already in queue",
+                "your_name": "Your name",
+                "name_updated": "Name updated to {0}"
             },
             "add": "Add",
             "boost": "Boost",
