@@ -4,6 +4,15 @@
     <div class="guest-logo">
       <img :src="logoSrc" alt="Music Assistant" class="logo-img" />
       <button
+        v-if="isGuestSession"
+        class="guest-leave-btn"
+        :title="$t('providers.party.guest_page.leave_party')"
+        @click="leaveParty"
+      >
+        <LogOut :size="12" />
+        <span>{{ $t("providers.party.guest_page.leave_party") }}</span>
+      </button>
+      <button
         v-if="guestIdentity"
         class="guest-name-chip"
         :title="$t('providers.party.guest_page.your_name')"
@@ -224,6 +233,7 @@ import { useGuestSearch } from "@/composables/useGuestSearch";
 import { usePartyConfig } from "@/composables/usePartyConfig";
 import { useRateLimiting } from "@/composables/useRateLimiting";
 import api from "@/plugins/api";
+import { authManager } from "@/plugins/auth";
 import {
   type Artist,
   type EventMessage,
@@ -234,7 +244,7 @@ import {
 } from "@/plugins/api/interfaces";
 import { $t } from "@/plugins/i18n";
 import { store } from "@/plugins/store";
-import { ArrowLeft, Music, Search, UserRound } from "@lucide/vue";
+import { ArrowLeft, LogOut, Music, Search, UserRound } from "@lucide/vue";
 import {
   computed,
   nextTick,
@@ -368,6 +378,19 @@ const goBack = () => {
 const handleClear = () => {
   clearSearch();
   // Scroll is triggered by the watcher above when PartyQueueSection remounts
+};
+
+// --- Leave party ---
+// Only for party-guest sessions; a signed-in admin previewing this view
+// keeps their session and can navigate away normally
+const isGuestSession = authManager.isPartyGuest();
+
+const leaveParty = async () => {
+  if (!window.confirm($t("providers.party.guest_page.leave_party_confirm"))) {
+    return;
+  }
+  // Revokes the guest token (best effort) and reloads to the login screen
+  await authManager.logout();
 };
 
 // --- Guest identity ---
@@ -663,6 +686,23 @@ onBeforeUnmount(() => {
   color: rgba(var(--v-theme-on-surface), 0.7);
   cursor: pointer;
   max-width: 8rem;
+}
+
+.guest-leave-btn {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  background: rgba(var(--v-theme-surface-variant), 0.1);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.15);
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: rgba(var(--v-theme-on-surface), 0.7);
+  cursor: pointer;
 }
 
 .guest-name-chip span {

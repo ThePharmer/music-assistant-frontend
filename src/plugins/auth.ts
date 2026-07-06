@@ -129,6 +129,17 @@ export class AuthManager {
   }
 
   /**
+   * True if the stored token belongs to a signed-in (non party-guest) user
+   * and has not expired. Used to avoid silently clobbering a real session
+   * when a party join link is opened on an already signed-in device.
+   */
+  hasValidNonGuestSession(): boolean {
+    if (!this.token || !this.claims) return false;
+    if (this.isPartyGuest()) return false;
+    return this.claims.exp * 1000 > Date.now();
+  }
+
+  /**
    * Set current user
    */
   setCurrentUser(user: User): void {

@@ -33,6 +33,54 @@
                 </div>
               </template>
 
+              <!-- Party link opened while already signed in -->
+              <template v-if="step === 'guest-confirm'">
+                <div class="text-center py-4">
+                  <v-icon color="primary" size="48" class="mb-2"
+                    >mdi-account-alert</v-icon
+                  >
+                  <p class="text-body-1 font-weight-medium mb-1">
+                    {{
+                      $t(
+                        "login.guest_confirm_title",
+                        "You're already signed in",
+                      )
+                    }}
+                  </p>
+                  <p class="text-body-2 text-medium-emphasis mb-4">
+                    {{
+                      $t(
+                        "login.guest_confirm_info",
+                        "This party link starts a guest session, which would sign out the current user:",
+                      )
+                    }}
+                    <b>{{ signedInUsername }}</b>
+                  </p>
+                  <v-btn
+                    color="primary"
+                    size="large"
+                    block
+                    rounded="lg"
+                    class="mb-2 text-none"
+                    @click="declineGuestJoin"
+                  >
+                    {{ $t("login.guest_confirm_stay", "Stay signed in") }}
+                  </v-btn>
+                  <v-btn
+                    variant="outlined"
+                    size="large"
+                    block
+                    rounded="lg"
+                    class="text-none"
+                    @click="confirmGuestJoin"
+                  >
+                    {{
+                      $t("login.guest_confirm_join", "Sign out & join as guest")
+                    }}
+                  </v-btn>
+                </div>
+              </template>
+
               <!-- Connection Mode Selector -->
               <template v-if="step === 'select-mode'">
                 <!-- Remote-only mode -->
@@ -516,12 +564,20 @@ const checkIfHostedWithAPI = async (): Promise<boolean> => {
 type Step =
   | "auto-connect"
   | "select-mode"
+  | "guest-confirm"
   | "login"
   | "connecting"
   | "reconnecting"
   | "error";
 const step = ref<Step>("auto-connect");
 const showLoginUI = ref(false);
+
+// Pending party join, held while the user confirms replacing a signed-in session
+const pendingGuestJoin = ref<{
+  remoteId: string | null;
+  joinCode: string;
+} | null>(null);
+const signedInUsername = computed(() => authManager.getClaim("username") || "");
 
 // Connection state
 const serverAddress = ref("");
@@ -744,6 +800,161 @@ const tryIngressAuth = async (): Promise<boolean> => {
 };
 
 /**
+ * Connect to a remote server and join the party with a guest code.
+ * Extracted from autoConnect so the guest-confirm step can resume it.
+ */
+const joinRemoteParty = async (
+  cleanRemoteId: string,
+  joinCode: string,
+): Promise<void> => {
+  // Clear any stale token before guest code auth
+  if (localStorage.getItem(STORAGE_KEY_TOKEN)) {
+    localStorage.removeItem(STORAGE_KEY_TOKEN);
+  }
+
+  localStorage.setItem(STORAGE_KEY_REMOTE_ID, cleanRemoteId);
+  // Store guest code in sessionStorage for SW reload recovery
+  sessionStorage.setItem(SESSION_KEY_PENDING_JOIN_CODE, joinCode);
+
+  connectionStatusMessage.value = t(
+    "login.connecting_remote_party",
+    "Connecting to party...",
+  );
+
+  try {
+    setRemoteIdFromString(cleanRemoteId);
+    step.value = "connecting";
+
+    const transport =
+      await remoteConnectionManager.connectRemote(cleanRemoteId);
+
+    // Connection established, emit connected event
+    emit("connected", transport);
+
+    // Wait for API to be ready
+    const apiConnected = await waitForApiConnection(15000);
+
+    if (apiConnected) {
+      // Exchange the guest code for a JWT token
+      const guestAuthResult = await tryGuestCodeAuth(joinCode);
+
+      if (guestAuthResult) {
+        // Clear the pending guest code - it's been successfully used
+        sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
+        // Clean up URL
+        const successUrlParams = new URLSearchParams(window.location.search);
+        if (successUrlParams.has("remote_id") || successUrlParams.has("join")) {
+          successUrlParams.delete("remote_id");
+          successUrlParams.delete("join");
+          const queryString = successUrlParams.toString();
+          const cleanUrl =
+            window.location.origin +
+            window.location.pathname +
+            (queryString ? "?" + queryString : "");
+          window.history.replaceState({}, "", cleanUrl);
+        }
+        return; // Success - App.vue will complete initialization
+      }
+    }
+
+    // Code exchange failed
+    sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
+    connectionError.value = t(
+      "login.error_party_auth_failed",
+      "Failed to join party. The code may have expired.",
+    );
+    step.value = "error";
+  } catch (error) {
+    sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
+    console.error("[Login] Remote party connection failed:", error);
+    connectionError.value =
+      error instanceof Error
+        ? error.message
+        : t("login.error_unknown", "Unknown error occurred");
+    step.value = "error";
+  }
+};
+
+/**
+ * Join a party hosted on the same server as the frontend.
+ * Extracted from autoConnect so the guest-confirm step can resume it.
+ */
+const joinLocalParty = async (joinCode: string): Promise<void> => {
+  connectionStatusMessage.value = t(
+    "login.connecting_local_party",
+    "Connecting to party...",
+  );
+
+  try {
+    const address =
+      window.location.origin + window.location.pathname.replace(/\/$/, "");
+    serverAddress.value = address;
+
+    emit("local-connect", address);
+    localStorage.setItem(STORAGE_KEY_SERVER_ADDRESS, address);
+
+    if (await waitForApiConnection()) {
+      if (await tryGuestCodeAuth(joinCode)) {
+        return; // Success - App.vue will take over
+      }
+    }
+
+    connectionError.value = t(
+      "login.error_party_auth_failed",
+      "Failed to join party. The code may have expired.",
+    );
+    step.value = "error";
+  } catch (error) {
+    console.error("[Login] Local party connection failed:", error);
+    connectionError.value =
+      error instanceof Error
+        ? error.message
+        : t("login.error_unknown", "Unknown error occurred");
+    step.value = "error";
+  }
+};
+
+/**
+ * User confirmed replacing their signed-in session with a party guest session
+ */
+const confirmGuestJoin = async () => {
+  const pending = pendingGuestJoin.value;
+  pendingGuestJoin.value = null;
+  if (!pending) return;
+  authManager.clearAuth();
+  if (pending.remoteId) {
+    await joinRemoteParty(pending.remoteId, pending.joinCode);
+  } else {
+    await joinLocalParty(pending.joinCode);
+  }
+};
+
+/**
+ * User chose to keep their signed-in session: drop the join code and
+ * re-run auto-connect, which signs back in with the stored token
+ */
+const declineGuestJoin = async () => {
+  pendingGuestJoin.value = null;
+  sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
+  // Remove join params from the URL so autoConnect doesn't re-enter the guest flow
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has("remote_id") || urlParams.has("join")) {
+    urlParams.delete("remote_id");
+    urlParams.delete("join");
+    const queryString = urlParams.toString();
+    window.history.replaceState(
+      {},
+      "",
+      window.location.origin +
+        window.location.pathname +
+        (queryString ? "?" + queryString : "") +
+        window.location.hash,
+    );
+  }
+  await autoConnect();
+};
+
+/**
  * Smart auto-connect logic
  */
 const autoConnect = async () => {
@@ -782,79 +993,18 @@ const autoConnect = async () => {
       .replace(/[^A-Z0-9]/g, "");
 
     if (cleanRemoteId.length === 26) {
-      // Clear any stale token before guest code auth
-      if (localStorage.getItem(STORAGE_KEY_TOKEN)) {
-        localStorage.removeItem(STORAGE_KEY_TOKEN);
-      }
-
-      localStorage.setItem(STORAGE_KEY_REMOTE_ID, cleanRemoteId);
-      // Store guest code in sessionStorage for SW reload recovery
-      sessionStorage.setItem(SESSION_KEY_PENDING_JOIN_CODE, effectiveJoinCode);
-
-      connectionStatusMessage.value = t(
-        "login.connecting_remote_party",
-        "Connecting to party...",
-      );
-
-      try {
-        setRemoteIdFromString(cleanRemoteId);
-        step.value = "connecting";
-
-        const transport =
-          await remoteConnectionManager.connectRemote(cleanRemoteId);
-
-        // Connection established, emit connected event
-        emit("connected", transport);
-
-        // Wait for API to be ready
-        const apiConnected = await waitForApiConnection(15000);
-
-        if (apiConnected) {
-          // Exchange the guest code for a JWT token
-          const guestAuthResult = await tryGuestCodeAuth(effectiveJoinCode);
-
-          if (guestAuthResult) {
-            // Clear the pending guest code - it's been successfully used
-            sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
-            // Clean up URL
-            const successUrlParams = new URLSearchParams(
-              window.location.search,
-            );
-            if (
-              successUrlParams.has("remote_id") ||
-              successUrlParams.has("join")
-            ) {
-              successUrlParams.delete("remote_id");
-              successUrlParams.delete("join");
-              const queryString = successUrlParams.toString();
-              const cleanUrl =
-                window.location.origin +
-                window.location.pathname +
-                (queryString ? "?" + queryString : "");
-              window.history.replaceState({}, "", cleanUrl);
-            }
-            return; // Success - App.vue will complete initialization
-          }
-        }
-
-        // Code exchange failed
-        sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
-        connectionError.value = t(
-          "login.error_party_auth_failed",
-          "Failed to join party. The code may have expired.",
-        );
-        step.value = "error";
-        return;
-      } catch (error) {
-        sessionStorage.removeItem(SESSION_KEY_PENDING_JOIN_CODE);
-        console.error("[Login] Remote party connection failed:", error);
-        connectionError.value =
-          error instanceof Error
-            ? error.message
-            : t("login.error_unknown", "Unknown error occurred");
-        step.value = "error";
+      // Don't silently clobber a signed-in session (e.g. the host scanning
+      // their own QR) - ask first; confirm/decline handlers resume the flow
+      if (authManager.hasValidNonGuestSession()) {
+        pendingGuestJoin.value = {
+          remoteId: cleanRemoteId,
+          joinCode: effectiveJoinCode,
+        };
+        step.value = "guest-confirm";
         return;
       }
+      await joinRemoteParty(cleanRemoteId, effectiveJoinCode);
+      return;
     }
   }
 
@@ -916,40 +1066,14 @@ const autoConnect = async () => {
     isHostedWithAPI.value = await checkIfHostedWithAPI();
 
     if (isHostedWithAPI.value) {
-      connectionStatusMessage.value = t(
-        "login.connecting_local_party",
-        "Connecting to party...",
-      );
-
-      try {
-        const address =
-          window.location.origin + window.location.pathname.replace(/\/$/, "");
-        serverAddress.value = address;
-
-        emit("local-connect", address);
-        localStorage.setItem(STORAGE_KEY_SERVER_ADDRESS, address);
-
-        if (await waitForApiConnection()) {
-          if (await tryGuestCodeAuth(urlJoinCode)) {
-            return; // Success - App.vue will take over
-          }
-        }
-
-        connectionError.value = t(
-          "login.error_party_auth_failed",
-          "Failed to join party. The code may have expired.",
-        );
-        step.value = "error";
-        return;
-      } catch (error) {
-        console.error("[Login] Local party connection failed:", error);
-        connectionError.value =
-          error instanceof Error
-            ? error.message
-            : t("login.error_unknown", "Unknown error occurred");
-        step.value = "error";
+      // Same session protection as the remote party path above
+      if (authManager.hasValidNonGuestSession()) {
+        pendingGuestJoin.value = { remoteId: null, joinCode: urlJoinCode };
+        step.value = "guest-confirm";
         return;
       }
+      await joinLocalParty(urlJoinCode);
+      return;
     }
   }
 
